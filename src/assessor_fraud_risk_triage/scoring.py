@@ -28,6 +28,8 @@ class ScoreResult:
     document_number: str
     recording_date: str
     document_type: str
+    case_number: str
+    related_party_name: str
     apn: str
     address: str
     parties: str
@@ -44,6 +46,7 @@ def score_records(
     entities: list[dict[str, str]] | None = None,
     vulnerable_window_days: int = 180,
     adjacency_window: int = 2,
+    max_chain_cluster_size: int = 250,
 ) -> tuple[list[ScoreResult], list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     cases = cases or []
     entities = entities or []
@@ -51,7 +54,7 @@ def score_records(
     registry = _build_entity_registry(entities)
     actor_counts = _actor_counts(normalized)
     cluster_rows = _cluster_rows(normalized)
-    chain_flags = _detect_chains(cluster_rows)
+    chain_flags = _detect_chains(cluster_rows, max_chain_cluster_size=max_chain_cluster_size)
     adjacency = _detect_adjacency(normalized, adjacency_window)
     graph_edges = _build_graph_edges(normalized)
 
@@ -117,6 +120,8 @@ def score_records(
                 document_number=row["document_number"],
                 recording_date=row["recording_date"],
                 document_type=row["document_type"],
+                case_number=row["case_number"],
+                related_party_name=row["related_party_name"],
                 apn=row["apn"],
                 address=row["address"],
                 parties=row["parties"],
@@ -137,6 +142,8 @@ def result_rows(results: Iterable[ScoreResult]) -> list[dict[str, object]]:
             "document_number": result.document_number,
             "recording_date": result.recording_date,
             "document_type": result.document_type,
+            "case_number": result.case_number,
+            "related_party_name": result.related_party_name,
             "apn": result.apn,
             "address": result.address,
             "parties": result.parties,
@@ -153,7 +160,7 @@ def result_rows(results: Iterable[ScoreResult]) -> list[dict[str, object]]:
 def _normalize_instrument(row: dict[str, str]) -> dict[str, str]:
     grantors = _first(row, "grantors", "grantor", "from_party")
     grantees = _first(row, "grantees", "grantee", "to_party")
-    combined = _first(row, "parties", "grantor_grantees", "names")
+    combined = _first(row, "parties", "grantor_grantees", "party_names", "names")
     if not combined:
         combined = " | ".join(part for part in (grantors, grantees) if part)
     return {
@@ -163,6 +170,8 @@ def _normalize_instrument(row: dict[str, str]) -> dict[str, str]:
         "recording_date_obj": _parse_date(_first(row, "recording_date", "recorded_date", "date")),
         "document_type": _first(row, "document_type", "doc_type", "type"),
         "document_type_norm": _norm(_first(row, "document_type", "doc_type", "type")),
+        "case_number": _first(row, "case_number"),
+        "related_party_name": _first(row, "related_party_name", "party", "name"),
         "apn": _first(row, "apn", "parcel", "parcel_number"),
         "address": _first(row, "address", "site_address", "property_address"),
         "address_norm": _norm(_first(row, "address", "site_address", "property_address")),
@@ -187,9 +196,22 @@ def _cluster_rows(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]
     return clusters
 
 
-def _detect_chains(clusters: dict[str, list[dict[str, str]]]) -> list[dict[str, object]]:
+def _detect_chains(clusters: dict[str, list[dict[str, str]]], max_chain_cluster_size: int = 250) -> list[dict[str, object]]:
     flags: list[dict[str, object]] = []
     for key, rows in clusters.items():
+        if len(rows) > max_chain_cluster_size:
+            flags.append(
+                {
+                    "cluster_key": key,
+                    "pattern": "noisy_cluster_chain_detection_skipped",
+                    "days_between": "",
+                    "document_numbers": "",
+                    "recording_dates": "",
+                    "document_types": f"{len(rows)} records",
+                    "status": "data_quality_guard_not_fraud_finding",
+                }
+            )
+            continue
         for i, first in enumerate(rows):
             for second in rows[i + 1 : i + 6]:
                 days = _days_between(first, second)
@@ -299,9 +321,9 @@ def _repeated_actors(row: dict[str, str], counts: Counter[str], threshold: int =
 def _build_entity_registry(entities: list[dict[str, str]]) -> dict[str, str]:
     registry: dict[str, str] = {}
     for entity in entities:
-        name = _norm(_first(entity, "entity_name", "name"))
+        name = _norm(_first(entity, "entity_name", "entity", "name"))
         if name:
-            registry[name] = _norm(_first(entity, "status", "entity_status")) or "UNKNOWN"
+            registry[name] = _norm(_first(entity, "status", "entity_status", "registry_status")) or "UNKNOWN"
     return registry
 
 

@@ -37,7 +37,21 @@ class ScoringTests(unittest.TestCase):
         payload = str(result_rows(results)) + str(chains) + str(summary)
         self.assertNotIn("fraud_finding", payload.replace("not_fraud_finding", ""))
 
+    def test_party_names_alias_is_used(self) -> None:
+        results, _chains, _edges, _summary = score_records(
+            [
+                {
+                    "document_number": "1",
+                    "recording_date": "2024-01-01",
+                    "document_type": "GRANT DEED",
+                    "party_names": "Alias Person | Alias LLC",
+                }
+            ]
+        )
+        rows = result_rows(results)
+        self.assertEqual(rows[0]["parties"], "Alias Person | Alias LLC")
+        self.assertIn("entity_counterparty", rows[0]["factors"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

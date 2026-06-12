@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
                 "document_number",
                 "recording_date",
                 "document_type",
+                "case_number",
+                "related_party_name",
                 "apn",
                 "address",
                 "parties",
@@ -68,4 +70,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
