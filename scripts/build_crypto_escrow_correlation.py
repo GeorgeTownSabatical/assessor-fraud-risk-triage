@@ -18,6 +18,12 @@ PRODUCTS = {
     "ETH": "ETH-USD",
     "SOL": "SOL-USD",
 }
+ASSET_STARTS = {
+    "BTC": date(2015, 1, 1),
+    "ETH": date(2016, 1, 1),
+    "SOL": date(2020, 3, 16),
+}
+TRANSFER_TERMS = ("DEED", "RECONVEYANCE", "ASSIGNMENT", "ASGT", "SUBSTITUTION", "TRUST", "TRANSFER")
 
 
 def main() -> int:
@@ -27,22 +33,29 @@ def main() -> int:
     parser.add_argument("--slug", default="crypto_escrow_correlation")
     parser.add_argument("--min-score", type=float, default=80.0)
     parser.add_argument("--window-days", type=int, default=45)
+    parser.add_argument("--include-non-transfer", action="store_true", help="Include non-transfer-like rows instead of transfer-like records only.")
     args = parser.parse_args()
 
-    events = _load_events(Path(args.risk_scores), args.min_score)
-    modern_events = [event for event in events if event["recording_date"] >= date(2020, 3, 16)]
+    events = _load_events(Path(args.risk_scores), args.min_score, transfer_like_only=not args.include_non_transfer)
+    modern_events = [event for event in events if event["recording_date"] >= min(ASSET_STARTS.values())]
     unique_dates = sorted({event["recording_date"] for event in modern_events})
     if not unique_dates:
         raise SystemExit("No SOL-era high-score transfer dates found.")
 
     start = min(unique_dates) - timedelta(days=args.window_days)
     end = max(unique_dates) + timedelta(days=args.window_days)
-    candles = {asset: _fetch_coinbase_candles(product, start, end) for asset, product in PRODUCTS.items()}
+    candles = {
+        asset: _fetch_coinbase_candles(product, max(start, ASSET_STARTS[asset]), end)
+        for asset, product in PRODUCTS.items()
+        if end >= ASSET_STARTS[asset]
+    }
 
     rows = []
     for event_date in unique_dates:
         documents = [event for event in modern_events if event["recording_date"] == event_date]
         for asset, asset_candles in candles.items():
+            if event_date < ASSET_STARTS[asset]:
+                continue
             metrics = _window_metrics(asset_candles, event_date, args.window_days)
             rows.append(
                 {
@@ -70,6 +83,7 @@ def main() -> int:
         "generated_utc": stamp,
         "risk_scores": str(Path(args.risk_scores)),
         "min_score": args.min_score,
+        "transfer_like_only": not args.include_non_transfer,
         "window_days": args.window_days,
         "events_considered": len(modern_events),
         "unique_event_dates": [d.isoformat() for d in unique_dates],
@@ -84,7 +98,7 @@ def main() -> int:
     return 0
 
 
-def _load_events(path: Path, min_score: float) -> list[dict[str, object]]:
+def _load_events(path: Path, min_score: float, transfer_like_only: bool) -> list[dict[str, object]]:
     events = []
     seen: set[tuple[str, date]] = set()
     with path.open(newline="", encoding="utf-8-sig") as handle:
@@ -94,6 +108,8 @@ def _load_events(path: Path, min_score: float) -> list[dict[str, object]]:
             except ValueError:
                 continue
             if score < min_score:
+                continue
+            if transfer_like_only and not any(term in row.get("document_type", "").upper() for term in TRANSFER_TERMS):
                 continue
             parsed_date = _parse_date(row.get("recording_date", ""))
             if not parsed_date:
@@ -115,6 +131,17 @@ def _load_events(path: Path, min_score: float) -> list[dict[str, object]]:
 
 
 def _fetch_coinbase_candles(product: str, start: date, end: date) -> list[dict[str, float | date]]:
+    candles: dict[date, dict[str, float | date]] = {}
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=250), end)
+        for row in _fetch_coinbase_candle_chunk(product, cursor, chunk_end):
+            candles[row["date"]] = row
+        cursor = chunk_end + timedelta(days=1)
+    return sorted(candles.values(), key=lambda row: row["date"])
+
+
+def _fetch_coinbase_candle_chunk(product: str, start: date, end: date) -> list[dict[str, float | date]]:
     params = urlencode(
         {
             "start": f"{start.isoformat()}T00:00:00Z",
@@ -148,6 +175,17 @@ def _window_metrics(candles: list[dict[str, float | date]], event_date: date, wi
     by_date = {row["date"]: row for row in candles}
     volumes = [float(row["volume"]) for row in candles]
     event = by_date.get(event_date)
+    if not event:
+        return {
+            "event_close_usd": "",
+            "event_exchange_volume_units": "",
+            "event_volume_percentile_in_pull_range": "",
+            "event_volume_zscore_in_pull_range": "",
+            "window_avg_exchange_volume_units": "",
+            "plus_minus_window_days": window_days,
+            "window_price_change_pct": "",
+            "interpretation": "no_market_data_for_event_date",
+        }
     window = [
         row
         for row in candles
@@ -179,6 +217,8 @@ def _window_metrics(candles: list[dict[str, float | date]], event_date: date, wi
 
 
 def _interpret(metrics: dict[str, object]) -> str:
+    if metrics.get("interpretation") == "no_market_data_for_event_date":
+        return "no_market_data_for_event_date"
     percentile = float(metrics["event_volume_percentile_in_pull_range"])
     zscore = float(metrics["event_volume_zscore_in_pull_range"])
     if percentile >= 0.9 or zscore >= 1.5:
@@ -270,4 +310,3 @@ def _parse_date(value: str) -> date | None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
